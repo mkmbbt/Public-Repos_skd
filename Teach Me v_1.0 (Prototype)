@@ -1,0 +1,130 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import customtkinter as ctk
+import fitz  # PyMuPDF
+import google.generativeai as genai
+import json
+import re
+
+# --- API SETUP ---
+# Your key: PASTE YOUR API KEY HERE FROM GEMINI
+genai.configure(api_key='PASTE YOUR API KEY HERE FROM GEMINI')
+
+class GeminiMasteryLMS(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Teach Me v 1.0")
+        self.geometry("1100x850")
+        
+        # --- ADD THESE TWO LINES TO FIX THE WINDOW SIZE ---
+        self.grid_columnconfigure(1, weight=1) # Makes the text area wide
+        self.grid_rowconfigure(0, weight=1)    # Makes the text area tall
+        # --------------------------------------------------
+        
+        self.chapters = []
+        self.current_chapter_index = 0
+        self.quiz_pool = []
+        self.setup_ui()
+
+    def setup_ui(self):
+        # Sidebar
+        self.sidebar = ctk.CTkFrame(self, width=220)
+        self.sidebar.grid(row=0, column=0, rowspan=2, sticky="nsew")
+        ctk.CTkLabel(self.sidebar, text="LMS Syetem", font=("Arial", 24, "bold")).pack(pady=30)
+        self.chapter_selector = ctk.CTkOptionMenu(self.sidebar, values=["Upload PDF"], command=self.jump_to_chapter)
+        self.chapter_selector.pack(pady=10, padx=10)
+        self.upload_btn = ctk.CTkButton(self.sidebar, text="Upload Book", command=self.upload_pdf)
+        self.upload_btn.pack(side="bottom", pady=20)
+
+        # Main Area - (The sticky="nsew" here only works if the weights above are set)
+        self.display_text = ctk.CTkTextbox(self, font=("Segoe UI", 16), wrap="word")
+        self.display_text.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+        
+        self.action_btn = ctk.CTkButton(self, text="Generate Quiz", state="disabled", command=self.start_ai_quiz)
+        self.action_btn.grid(row=1, column=1, pady=20, sticky="ew") # Added sticky="ew" to make the button look better too
+
+    def upload_pdf(self):
+        f = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
+        if f:
+            doc = fitz.open(f)
+            text = "".join([page.get_text() for page in doc])
+            self.chapters = [p.strip() for p in re.split(r"(?i)chapter|section", text) if len(p.strip()) > 500]
+            if self.chapters:
+                self.chapter_selector.configure(values=[f"Chapter {i+1}" for i in range(len(self.chapters))])
+                self.load_chapter(0)
+                self.action_btn.configure(state="normal")
+
+    def load_chapter(self, idx):
+        self.current_chapter_index = idx
+        self.display_text.delete("0.0", "end")
+        self.display_text.insert("0.0", self.chapters[idx])
+
+    def jump_to_chapter(self, choice):
+        idx = int(re.search(r'\d+', choice).group()) - 1
+        self.load_chapter(idx)
+
+    def start_ai_quiz(self):
+        self.action_btn.configure(text="Connecting to Gemini...", state="disabled")
+        self.update()
+        
+        # 2026 STABLE MODELS: Try gemini-2.5-flash or gemini-2.0-flash
+        model_name = 'gemini-2.5-flash' 
+        
+        content = self.chapters[self.current_chapter_index][:8000]
+        prompt = f"Read this and make 10 difficult MCQs. Return ONLY as a JSON list. Format: [{{'q': '...', 'a': ['...', '...', '...', '...'], 'correct': '...'}}]. TEXT: {content}"
+        
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            
+            # Clean response text
+            txt = response.text.strip()
+            if "```json" in txt:
+                txt = txt.split("```json")[1].split("```")[0].strip()
+            elif "```" in txt:
+                txt = txt.split("```")[1].split("```")[0].strip()
+                
+            self.quiz_pool = json.loads(txt)
+            self.show_quiz()
+        except Exception as e:
+            # If 2.5 fails, try the older but reliable 1.5-flash
+            try:
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                response = model.generate_content(prompt)
+                txt = response.text.strip().replace("```json", "").replace("```", "")
+                self.quiz_pool = json.loads(txt)
+                self.show_quiz()
+            except Exception as e2:
+                messagebox.showerror("AI Error", f"Model Error: {e}\n\nFallback Error: {e2}")
+        finally:
+            self.action_btn.configure(text="Generate Quiz", state="normal")
+
+    def show_quiz(self):
+        self.win = ctk.CTkToplevel(self)
+        self.win.geometry("600x600")
+        self.win.attributes("-topmost", True)
+        self.q_idx = 0
+        self.score = 0
+        self.render_q()
+
+    def render_q(self):
+        for w in self.win.winfo_children(): w.destroy()
+        if self.q_idx < len(self.quiz_pool):
+            q = self.quiz_pool[self.q_idx]
+            ctk.CTkLabel(self.win, text=q['q'], wraplength=500, font=("Arial", 16, "bold")).pack(pady=20)
+            for a in q['a']:
+                ctk.CTkButton(self.win, text=a, width=400, command=lambda o=a: self.check(o)).pack(pady=5)
+        else:
+            if self.score == len(self.quiz_pool):
+                messagebox.showinfo("Mastery", "100%! Mastered.")
+            else:
+                messagebox.showerror("Failed", f"Score: {self.score}/{len(self.quiz_pool)}. Not 100%. Review text and try again.")
+            self.win.destroy()
+
+    def check(self, choice):
+        if choice == self.quiz_pool[self.q_idx]['correct']: self.score += 1
+        self.q_idx += 1
+        self.render_q()
+
+if __name__ == "__main__":
+    GeminiMasteryLMS().mainloop()
